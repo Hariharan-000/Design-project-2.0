@@ -40,7 +40,7 @@ import {
   type User as PersistedUser
 } from './services/databaseService';
 
-const API_BASE_URL = 'http://localhost:5002/api';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || (window.location.hostname === 'localhost' ? 'http://localhost:5002/api' : '/api');
 
 function normalizeProduct(product: Product & { _id?: string }) {
   return {
@@ -396,18 +396,18 @@ export default function App() {
         setProducts(data.products.map(normalizeProduct));
       } else {
         console.warn('   ⚠️ No products in response');
-        setProducts([]);
+        setProducts(MOCK_PRODUCTS.map(normalizeProduct));
       }
     } catch (error) {
       console.error('   ❌ Failed to load products:', error);
-      setProducts([]);
+      setProducts(MOCK_PRODUCTS.map(normalizeProduct));
     }
   };
 
   // Load categories from backend API
   const loadCategories = async () => {
     try {
-      const response = await fetch('http://localhost:5002/api/categories');
+      const response = await fetch(`${API_BASE_URL}/categories`);
       const data = await response.json();
       if (data.success && data.categories) {
         setCategories(data.categories);
@@ -427,7 +427,7 @@ export default function App() {
     }
 
     try {
-      const response = await fetch('http://localhost:5002/api/categories', {
+      const response = await fetch(`${API_BASE_URL}/categories`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -469,7 +469,7 @@ export default function App() {
     }
 
     try {
-      const response = await fetch('http://localhost:5002/api/categories/reseed', {
+      const response = await fetch(`${API_BASE_URL}/categories/reseed`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -514,7 +514,7 @@ export default function App() {
       console.log(`   User: ${user.email}`);
       console.log(`   Role: ${user.role}`);
       
-      const url = `http://localhost:5002/api/categories/${encodeURIComponent(categoryName)}`;
+      const url = `${API_BASE_URL}/categories/${encodeURIComponent(categoryName)}`;
       console.log(`   API: DELETE ${url}`);
 
       const response = await fetch(url, {
@@ -637,7 +637,7 @@ export default function App() {
       console.log('   Price:', productData.price);
       console.log('   Has image:', !!productData.image);
       
-      const response = await fetch('http://localhost:5002/api/products', {
+      const response = await fetch(`${API_BASE_URL}/products`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -2387,6 +2387,7 @@ export default function App() {
     </div>
   );
 }
+
 
 
 
