@@ -54,9 +54,9 @@ export const MOCK_PRODUCTS: Product[] = [
     name: "Amoxicillin 250mg",
     category: "Cold & Flu",
     price: 120,
-    description: "Antibiotic used to treat various bacterial infections. [Prescription Required]",
+    description: "Antibiotic used to treat various bacterial infections.",
     image: "https://images.unsplash.com/photo-1471864190281-a93a3070b6de?auto=format&fit=crop&q=80&w=400&h=400",
-    requiresPrescription: true,
+    requiresPrescription: false,
     dosage: "As directed by physician"
   },
   {
@@ -248,9 +248,9 @@ export const MOCK_PRODUCTS: Product[] = [
     name: "Oxygen Concentrator",
     category: "Medical Devices",
     price: 35000,
-    description: "Portable oxygen concentrator for continuous oxygen supply. High purity. [Prescription Required]",
+    description: "Portable oxygen concentrator for continuous oxygen supply. High purity.",
     image: "https://images.unsplash.com/photo-1584036561566-baf8f5f1b144?auto=format&fit=crop&q=80&w=400&h=400",
-    requiresPrescription: true
+    requiresPrescription: false
   },
   {
     id: "25",

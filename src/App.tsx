@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { 
   Search, 
   ShoppingCart, 
@@ -27,9 +27,95 @@ import {
   Upload
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { GoogleGenAI } from "@google/genai";
-import { Product, CATEGORIES, MOCK_PRODUCTS } from './constants';
+import { Product, MOCK_PRODUCTS, CATEGORIES } from './constants';
 import { getGeminiResponse } from './services/geminiService';
+import {
+  getAllUsers as fetchAllUsers,
+  getCurrentUser,
+  loginUser,
+  logoutUser,
+  registerUser,
+  saveCurrentUser,
+  updateUserProfile,
+  type User as PersistedUser
+} from './services/databaseService';
+
+const API_BASE_URL = 'http://localhost:5002/api';
+
+function normalizeProduct(product: Product & { _id?: string }) {
+  return {
+    ...product,
+    id: product.id || product._id || '',
+    requiresPrescription: false,
+  };
+}
+
+async function readJsonSafely(response: Response) {
+  const text = await response.text();
+
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+type FrontendUserRole = 'admin' | 'owner' | 'user';
+
+type AppUser = {
+  id: string;
+  name: string;
+  email: string;
+  role: FrontendUserRole;
+  avatar?: string;
+  phone?: string;
+  address?: string;
+};
+
+function mapBackendRoleToFrontend(role: PersistedUser['role']): FrontendUserRole {
+  return role === 'customer' ? 'user' : role;
+}
+
+function mapFrontendRoleToBackend(role: FrontendUserRole): PersistedUser['role'] {
+  return role === 'user' ? 'customer' : role;
+}
+
+function toAppUser(user: PersistedUser): AppUser {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: mapBackendRoleToFrontend(user.role),
+    avatar: user.avatar,
+    phone: user.phone,
+    address: user.address
+  };
+}
+
+function toPersistedUser(user: AppUser): PersistedUser {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: mapFrontendRoleToBackend(user.role),
+    avatar: user.avatar,
+    phone: user.phone,
+    address: user.address
+  };
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error('Failed to read image file'));
+    reader.readAsDataURL(file);
+  });
+}
 
 export default function App() {
   const [activeCategory, setActiveCategory] = useState('All');
@@ -45,7 +131,7 @@ export default function App() {
   const [isWishlistOpen, setIsWishlistOpen] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isSignUp, setIsSignUp] = useState(false);
-  const [user, setUser] = useState<{ name: string, email: string, role?: 'admin' | 'owner' | 'user', avatar?: string } | null>(null);
+  const [user, setUser] = useState<AppUser | null>(null);
   const [loginData, setLoginData] = useState({ email: '', password: '', name: '' });
   const [loginError, setLoginError] = useState('');
   const [wishlist, setWishlist] = useState<string[]>([]);
@@ -60,14 +146,142 @@ export default function App() {
   const [ownerPassword, setOwnerPassword] = useState('owner123');
   const [isResetPasswordOpen, setIsResetPasswordOpen] = useState(false);
   const [newOwnerPassword, setNewOwnerPassword] = useState('');
-  const [products, setProducts] = useState<Product[]>(MOCK_PRODUCTS);
+  const [products, setProducts] = useState<Product[]>([]);
   const [registeredUsers, setRegisteredUsers] = useState<{ email: string; password: string; name: string }[]>([]);
   const [isShopAvailable, setIsShopAvailable] = useState(true);
+  const [categories, setCategories] = useState<string[]>([]);
+  const [isAddCategoryOpen, setIsAddCategoryOpen] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
+
+  const applyLoggedInUser = (persistedUser: PersistedUser) => {
+    const nextUser = toAppUser(persistedUser);
+    setUser(nextUser);
+    setIsLoggedIn(true);
+    saveCurrentUser(toPersistedUser(nextUser));
+    return nextUser;
+  };
+
+  const findPersistedUserByEmail = async (email: string) => {
+    const result = await fetchAllUsers();
+
+    if (!result.success) {
+      throw new Error(result.error || 'Failed to fetch users');
+    }
+
+    return result.users.find(
+      (existingUser) => existingUser.email.toLowerCase() === email.toLowerCase()
+    ) || null;
+  };
+
+  const ensurePersistedUser = async ({
+    name,
+    email,
+    password,
+    role,
+    avatar
+  }: {
+    name: string;
+    email: string;
+    password: string;
+    role: PersistedUser['role'];
+    avatar?: string;
+  }) => {
+    const existingUser = await findPersistedUserByEmail(email);
+    if (existingUser) {
+      return existingUser;
+    }
+
+    const registration = await registerUser(name, email, password, role, avatar);
+    if (!registration.success) {
+      throw new Error(registration.error || 'Failed to register user');
+    }
+
+    return {
+      ...registration.user,
+      role,
+      avatar: avatar || registration.user.avatar
+    } as PersistedUser;
+  };
   
-  const handleDeleteProduct = (productId: string) => {
+  /*
+  const handleDeleteProduct = async (productId: string) => {
+    if (!productId) {
+      alert('Unable to delete product because the product ID is missing.');
+      return;
+    }
+
     if (confirm('Are you sure you want to delete this product?')) {
-      setProducts(prev => prev.filter(p => p.id !== productId));
-      setSelectedProduct(null);
+      try {
+        console.log(`\n🗑️ [Frontend] Deleting product: ${productId}`);
+        
+        const response = await fetch(`${API_BASE_URL}/products/${productId}`, {
+          method: 'DELETE'
+        });
+
+        
+        const data = await readJsonSafely(response);
+          console.error('   ❌ Failed to parse response:', jsonError.message);
+        }
+
+        // Check if operation was successful
+        if (!response.ok) {
+          console.error(`   ❌ HTTP Error: ${response.status} - ${data.error}`);
+          throw new Error(data.error || `HTTP ${response.status}`);
+        }
+
+        if (data.success) {
+          console.log(`   ✅ Product deleted from database`);
+          // Reload products from backend to ensure consistency
+          await loadProducts();
+          setSelectedProduct(null);
+          alert('✅ Product deleted successfully!');
+        } else {
+          console.error(`   ❌ Delete failed: ${data.error}`);
+          throw new Error(data.error || 'Failed to delete product');
+        }
+      } catch (error) {
+        console.error('❌ Failed to delete product:', error.message);
+        alert(`Failed to delete product: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    }
+  };
+
+  };
+  */
+
+  const handleDeleteProduct = async (productId: string) => {
+    if (!productId) {
+      alert('Unable to delete product because the product ID is missing.');
+      return;
+    }
+
+    if (confirm('Are you sure you want to delete this product?')) {
+      try {
+        const response = await fetch(`${API_BASE_URL}/products/${productId}`, {
+          method: 'DELETE'
+        });
+
+        const data = await readJsonSafely(response);
+
+        if (!response.ok) {
+          throw new Error(data?.error || data?.message || `HTTP ${response.status}`);
+        }
+
+        if (!data?.success) {
+          throw new Error(data?.error || 'Failed to delete product');
+        }
+
+        setProducts((prev) => prev.filter((product) => product.id !== productId));
+        setWishlist((prev) => prev.filter((id) => id !== productId));
+        setSelectedProduct((current) => current?.id === productId ? null : current);
+        setIsEditingProduct(false);
+        setEditProductImage('');
+        alert('Product deleted successfully!');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        console.error('Failed to delete product:', message);
+        alert(`Failed to delete product: ${message}`);
+      }
     }
   };
 
@@ -78,15 +292,49 @@ export default function App() {
     }
   };
 
-  const handleSaveProductImage = () => {
+  const handleSaveProductImage = async () => {
     if (selectedProduct && editProductImage.trim()) {
-      const updatedProducts = products.map(p => 
-        p.id === selectedProduct.id ? { ...p, image: editProductImage } : p
-      );
-      setProducts(updatedProducts);
-      setSelectedProduct({ ...selectedProduct, image: editProductImage });
-      setIsEditingProduct(false);
-      setEditProductImage('');
+      try {
+        const nextImage = editProductImage.trim();
+        const response = await fetch(`${API_BASE_URL}/products/${selectedProduct.id}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            name: selectedProduct.name,
+            category: selectedProduct.category,
+            price: selectedProduct.price,
+            description: selectedProduct.description,
+            image: nextImage,
+            requiresPrescription: selectedProduct.requiresPrescription,
+            dosage: selectedProduct.dosage ?? ''
+          })
+        });
+
+        const data = await readJsonSafely(response);
+
+        if (!response.ok) {
+          throw new Error(data?.error || data?.message || `HTTP ${response.status}`);
+        }
+
+        if (data?.success) {
+          const updatedProduct = normalizeProduct(data.product || { ...selectedProduct, image: nextImage });
+          setProducts((prev) => prev.map((product) => (
+            product.id === updatedProduct.id ? updatedProduct : product
+          )));
+          setSelectedProduct(updatedProduct);
+          setIsEditingProduct(false);
+          setEditProductImage('');
+          alert('Product image updated successfully!');
+        } else {
+          alert('Error: ' + (data?.error || 'Failed to update product image'));
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        console.error('Failed to update product image:', message);
+        alert(`Failed to update product image: ${message}`);
+      }
     }
   };
 
@@ -121,12 +369,200 @@ export default function App() {
 
   const [newProduct, setNewProduct] = useState<Partial<Product>>({
     name: '',
-    category: CATEGORIES[1],
+    category: '',
     price: 0,
     description: '',
     image: '',
     requiresPrescription: false
   });
+
+  // Load products and categories from MongoDB on component mount
+  useEffect(() => {
+    loadProducts();
+    loadCategories();
+  }, []);
+
+  // Fetch all products from backend API
+  const loadProducts = async () => {
+    try {
+      console.log('\n📦 [loadProducts] Fetching products from server...');
+      const response = await fetch(`${API_BASE_URL}/products`);
+      const data = await readJsonSafely(response);
+      if (!response.ok) {
+        throw new Error(data?.error || `HTTP ${response.status}`);
+      }
+      console.log(`   ✅ Received ${data.products?.length || 0} products`);
+      if (data?.success && Array.isArray(data.products)) {
+        setProducts(data.products.map(normalizeProduct));
+      } else {
+        console.warn('   ⚠️ No products in response');
+        setProducts([]);
+      }
+    } catch (error) {
+      console.error('   ❌ Failed to load products:', error);
+      setProducts([]);
+    }
+  };
+
+  // Load categories from backend API
+  const loadCategories = async () => {
+    try {
+      const response = await fetch('http://localhost:5002/api/categories');
+      const data = await response.json();
+      if (data.success && data.categories) {
+        setCategories(data.categories);
+      }
+    } catch (error) {
+      console.error('Failed to load categories:', error);
+      // Fallback to default categories if API fails
+      setCategories(CATEGORIES);
+    }
+  };
+
+  // Add new category (admin/owner only)
+  const handleAddCategory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newCategoryName.trim() || !user || (user.role !== 'admin' && user.role !== 'owner')) {
+      return;
+    }
+
+    try {
+      const response = await fetch('http://localhost:5002/api/categories', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          name: newCategoryName.trim(),
+          user_id: user.email,
+          user_role: user.role
+        })
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        // Reload categories
+        await loadCategories();
+        // Automatically assign the newly created category to the product
+        setNewProduct({...newProduct, category: newCategoryName.trim()});
+        setNewCategoryName('');
+        setIsAddCategoryOpen(false);
+        alert('Category created successfully and assigned to this product!');
+      } else {
+        alert('Error: ' + data.error);
+      }
+    } catch (error) {
+      console.error('Failed to add category:', error);
+      alert('Failed to add category. Please try again.');
+    }
+  };
+
+  // Reseed categories (admin/owner only)
+  const handleReseedCategories = async () => {
+    if (!user || (user.role !== 'admin' && user.role !== 'owner')) {
+      alert('Only admin and owner can reseed categories');
+      return;
+    }
+
+    if (!confirm('This will reload all default categories. Continue?')) {
+      return;
+    }
+
+    try {
+      const response = await fetch('http://localhost:5002/api/categories/reseed', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          user_role: user.role
+        })
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        // Reload categories
+        await loadCategories();
+        alert('✅ All categories have been loaded! ' + data.categories.length + ' categories available.');
+      } else {
+        alert('Error: ' + data.error);
+      }
+    } catch (error) {
+      console.error('Failed to reseed categories:', error);
+      alert('Failed to reseed categories. Please try again.');
+    }
+  };
+
+  // Delete category (admin/owner only)
+  const handleDeleteCategory = async (categoryName: string) => {
+    if (categoryName === 'All') {
+      alert('Cannot delete the "All" category');
+      return;
+    }
+
+    if (!user || (user.role !== 'admin' && user.role !== 'owner')) {
+      alert('Only admin and owner can delete categories');
+      return;
+    }
+
+    if (!confirm(`Are you sure you want to delete "${categoryName}" category?`)) {
+      return;
+    }
+
+    try {
+      console.log(`\n🗑️ [Frontend] Deleting category: "${categoryName}"`);
+      console.log(`   User: ${user.email}`);
+      console.log(`   Role: ${user.role}`);
+      
+      const url = `http://localhost:5002/api/categories/${encodeURIComponent(categoryName)}`;
+      console.log(`   API: DELETE ${url}`);
+
+      const response = await fetch(url, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          user_role: user.role
+        })
+      });
+
+      console.log(`   Response status: ${response.status} ${response.statusText}`);
+
+      // Check if response is ok
+      if (!response.ok) {
+        console.error(`   ❌ HTTP Error: ${response.status}`);
+      }
+
+      // Try to parse response
+      let data;
+      try {
+        data = await response.json();
+        console.log(`   Response data:`, data);
+      } catch (jsonError) {
+        console.error('   ❌ Response is not valid JSON:', jsonError);
+        const text = await response.text();
+        console.error('   Response text:', text);
+        throw new Error('Server returned invalid response. Check server logs.');
+      }
+      
+      if (data.success) {
+        console.log(`   ✅ Category deleted successfully!`);
+        // Reload categories and reset to "All" if current category was deleted
+        await loadCategories();
+        if (activeCategory === categoryName) {
+          setActiveCategory('All');
+        }
+        alert(`✅ Category "${categoryName}" deleted successfully!`);
+      } else {
+        console.error(`   ❌ Delete failed: ${data.error}`);
+        alert(`Error: ${data.error || 'Failed to delete category'}`);
+      }
+    } catch (error) {
+      console.error('❌ [Frontend] Failed to delete category:', error);
+      alert(`Failed to delete category: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
 
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -139,6 +575,37 @@ export default function App() {
     }
   };
 
+  const mergedCategories = useMemo(() => {
+    const uniqueCategories = new Map<string, string>();
+
+    const addCategory = (value?: string) => {
+      if (!value) {
+        return;
+      }
+
+      const trimmedValue = value.trim();
+      if (!trimmedValue) {
+        return;
+      }
+
+      const key = trimmedValue.toLowerCase();
+      if (!uniqueCategories.has(key)) {
+        uniqueCategories.set(key, trimmedValue);
+      }
+    };
+
+    addCategory('All');
+    categories.forEach(addCategory);
+    products.forEach((product) => addCategory(product.category));
+
+    return Array.from(uniqueCategories.values());
+  }, [categories, products]);
+
+  const selectableCategories = useMemo(
+    () => mergedCategories.filter((category) => category !== 'All'),
+    [mergedCategories]
+  );
+
   // Filter products based on category and search
   const filteredProducts = useMemo(() => {
     return products.filter(p => {
@@ -149,30 +616,72 @@ export default function App() {
     });
   }, [activeCategory, searchQuery, products]);
 
-  const handleAddProduct = (e: React.FormEvent) => {
+  const handleAddProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newProduct.name || !newProduct.price || !newProduct.description) return;
 
-    const productToAdd: Product = {
-      id: Date.now().toString(),
-      name: newProduct.name,
-      category: newProduct.category || CATEGORIES[1],
-      price: Number(newProduct.price),
-      description: newProduct.description,
-      image: newProduct.image || 'https://images.unsplash.com/photo-1584308666721-bb8bd1f9913d?auto=format&fit=crop&q=80&w=400&h=400',
-      requiresPrescription: !!newProduct.requiresPrescription
-    };
+    try {
+      const productData = {
+        name: newProduct.name,
+        category: newProduct.category || selectableCategories[0] || 'General',
+        price: Number(newProduct.price),
+        description: newProduct.description,
+        image: newProduct.image || 'https://images.unsplash.com/photo-1584308666721-bb8bd1f9913d?auto=format&fit=crop&q=80&w=400&h=400',
+        requiresPrescription: false,
+        dosage: newProduct.dosage || ''
+      };
 
-    setProducts(prev => [productToAdd, ...prev]);
-    setIsAddProductOpen(false);
-    setNewProduct({
-      name: '',
-      category: CATEGORIES[1],
-      price: 0,
-      description: '',
-      image: '',
-      requiresPrescription: false
-    });
+      console.log('\n📝 [handleAddProduct] Adding new product:');
+      console.log('   Name:', productData.name);
+      console.log('   Category:', productData.category);
+      console.log('   Price:', productData.price);
+      console.log('   Has image:', !!productData.image);
+      
+      const response = await fetch('http://localhost:5002/api/products', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(productData)
+      });
+
+      console.log('   Response status:', response.status);
+      
+      let data;
+      try {
+        data = await response.json();
+        console.log('   Response data:', data);
+      } catch (jsonError) {
+        console.error('   ❌ Failed to parse response:', jsonError.message);
+        throw new Error('Invalid server response');
+      }
+      
+      if (data.success && response.ok) {
+        console.log('   ✅ Product created with ID:', data.product._id);
+        console.log('   📦 Reloading products list...');
+        
+        // Reload products from backend to ensure consistency
+        await loadProducts();
+        
+        // Close modal and reset form
+        setIsAddProductOpen(false);
+        setNewProduct({
+          name: '',
+          category: selectableCategories[0] || '',
+          price: 0,
+          description: '',
+          image: '',
+          requiresPrescription: false
+        });
+        alert('✅ Product added successfully!');
+      } else {
+        console.error('   ❌ Server error:', data.error);
+        alert('Error: ' + data.error);
+      }
+    } catch (error) {
+      console.error('❌ [handleAddProduct] Error:', error.message);
+      alert('Failed to add product: ' + (error instanceof Error ? error.message : 'Unknown error'));
+    }
   };
   const toggleWishlist = (productId: string) => {
     setWishlist(prev => 
@@ -404,15 +913,19 @@ export default function App() {
 
         <div className="flex items-center gap-4">
           {(user?.role === 'admin' || user?.role === 'owner') && (
-            <button 
+            <motion.button 
               onClick={() => setIsAddProductOpen(true)}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
               className="flex items-center gap-2 px-3 py-1.5 md:px-4 md:py-2 bg-emerald-500 text-white rounded-xl font-bold shadow-lg shadow-emerald-200 hover:bg-emerald-600 transition-all text-xs md:text-sm"
             >
               <Plus size={16} className="md:w-[18px] md:h-[18px]" /> Add Product
-            </button>
+            </motion.button>
           )}
-          <button 
+          <motion.button 
             onClick={() => setIsLoginOpen(true)}
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
             className="flex items-center gap-2 p-2 text-slate-600 hover:bg-slate-100 rounded-full transition-colors relative group"
           >
             {isLoggedIn && user?.avatar ? (
@@ -428,7 +941,7 @@ export default function App() {
             {isLoggedIn && (
               <span className="absolute top-1 left-1 w-2.5 h-2.5 bg-emerald-500 rounded-full border-2 border-white" />
             )}
-          </button>
+          </motion.button>
           <button className="md:hidden p-2 text-slate-600 hover:bg-slate-100 rounded-full transition-colors">
             <Menu size={22} />
           </button>
@@ -491,26 +1004,64 @@ export default function App() {
               <Filter size={16} />
               <span className="text-sm font-medium">Categories:</span>
             </div>
-            {CATEGORIES.map(cat => (
-              <button
+            {mergedCategories.map(cat => (
+              <motion.div
                 key={cat}
-                onClick={() => setActiveCategory(cat)}
-                className={`px-6 py-2 rounded-full text-sm font-medium transition-all shrink-0 ${
-                  activeCategory === cat 
-                  ? 'bg-primary text-white shadow-md shadow-primary/20' 
-                  : 'bg-white text-slate-600 border border-slate-200 hover:border-primary/50'
-                }`}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                transition={{ duration: 0.3 }}
+                className="group relative shrink-0"
               >
-                {cat}
-              </button>
+                <motion.button
+                  onClick={() => setActiveCategory(cat)}
+                  className={`px-6 py-2 rounded-full text-sm font-medium transition-all ${
+                    activeCategory === cat 
+                    ? 'bg-primary text-white shadow-md shadow-primary/20' 
+                    : 'bg-white text-slate-600 border border-slate-200 hover:border-primary/50'
+                  }`}
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  {cat}
+                </motion.button>
+                
+                {/* Delete button for admin/owner (shows on hover) */}
+                {(user?.role === 'admin' || user?.role === 'owner') && cat !== 'All' && (
+                  <motion.button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteCategory(cat);
+                    }}
+                    className="absolute -top-2.5 -right-2.5 p-1 bg-red-500 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-md"
+                    whileHover={{ scale: 1.1 }}
+                    whileTap={{ scale: 0.9 }}
+                    title={`Delete ${cat} category`}
+                  >
+                    <X size={12} strokeWidth={2.5} />
+                  </motion.button>
+                )}
+              </motion.div>
             ))}
           </div>
+          {(user?.role === 'admin' || user?.role === 'owner') && (
+            <motion.button
+              type="button"
+              onClick={() => setIsAddCategoryOpen(true)}
+              className="px-6 py-2 bg-primary text-white rounded-full hover:bg-primary/90 transition-all font-bold text-sm flex items-center justify-center gap-2 shrink-0"
+              title="Add new category"
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+            >
+              + Add Category
+            </motion.button>
+          )}
 
 
         </div>
 
         {/* Product Grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div id="products-section" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
           <AnimatePresence mode="popLayout">
             {filteredProducts.map(product => (
               <motion.div
@@ -520,9 +1071,109 @@ export default function App() {
                 exit={{ opacity: 0, scale: 0.9 }}
                 key={product.id}
                 onClick={() => setSelectedProduct(product)}
-                className="bg-white rounded-2xl border border-slate-100 p-4 hover:shadow-xl hover:shadow-slate-200/50 transition-all group cursor-pointer"
+                whileHover={{ y: -8 }}
+                transition={{ type: "spring", stiffness: 260, damping: 22 }}
+                className={`group relative cursor-pointer overflow-hidden rounded-[28px] border border-white/80 bg-white/95 p-3 shadow-[0_22px_55px_-32px_rgba(15,23,42,0.35)] transition-all ${
+                  isShopAvailable
+                    ? 'hover:border-emerald-200/80 hover:shadow-[0_32px_75px_-35px_rgba(16,185,129,0.35)]'
+                    : 'grayscale hover:border-slate-200/80 hover:shadow-[0_28px_65px_-35px_rgba(15,23,42,0.22)]'
+                }`}
               >
-                <div className="relative aspect-square rounded-xl overflow-hidden mb-4 bg-slate-50">
+                <div className="pointer-events-none absolute inset-x-8 top-0 h-24 rounded-b-full bg-emerald-100/70 blur-3xl transition-opacity duration-300 group-hover:opacity-100" />
+
+                <div className="relative mb-5 overflow-hidden rounded-[24px] border border-slate-100/80 bg-[linear-gradient(160deg,#f8fafc_0%,#ffffff_52%,#ecfdf5_100%)]">
+                  <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.98),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(16,185,129,0.18),transparent_45%)]" />
+
+                  <div className="absolute inset-x-4 top-4 z-10 flex items-start justify-between gap-3">
+                    <span className="max-w-[70%] truncate rounded-full bg-white/90 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-700 shadow-sm backdrop-blur-sm">
+                      {product.category}
+                    </span>
+
+                    <div className="flex items-center gap-2">
+                      {(user?.role === 'admin' || user?.role === 'owner') && (
+                        <button 
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteProduct(product.id);
+                          }}
+                          className="flex h-10 w-10 items-center justify-center rounded-full bg-red-500/95 text-white shadow-lg shadow-red-200/80 transition-all hover:scale-105 hover:bg-red-600"
+                          title="Delete product"
+                        >
+                          <X size={16} />
+                        </button>
+                      )}
+
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleWishlist(product.id);
+                        }}
+                        className={`flex h-10 w-10 items-center justify-center rounded-full border border-white/80 bg-white/90 backdrop-blur-sm shadow-lg shadow-slate-200/70 transition-all ${
+                          wishlist.includes(product.id) ? 'text-red-500' : 'text-slate-400 hover:text-red-500'
+                        }`}
+                        title={wishlist.includes(product.id) ? 'Remove from wishlist' : 'Add to wishlist'}
+                      >
+                        <Heart size={18} fill={wishlist.includes(product.id) ? 'currentColor' : 'none'} />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="relative aspect-[4/3] px-6 pb-6 pt-16">
+                    <img 
+                      src={product.image} 
+                      alt={product.name}
+                      className="h-full w-full object-contain drop-shadow-[0_20px_30px_rgba(15,23,42,0.14)] transition-transform duration-500 group-hover:scale-[1.06]"
+                      referrerPolicy="no-referrer"
+                      onError={(e) => {
+                        e.currentTarget.src = `https://picsum.photos/seed/${product.id}/400/400`;
+                      }}
+                    />
+                  </div>
+
+                  <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-white/75 to-transparent" />
+                </div>
+
+                <div className="relative px-2 pb-2">
+                  <div className="mb-3 flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="mb-1 text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">
+                        Curated For Care
+                      </p>
+                      <h3 className="line-clamp-2 text-xl font-bold leading-tight text-slate-900">
+                        {product.name}
+                      </h3>
+                    </div>
+
+                  </div>
+
+                  <p className="mb-4 min-h-[48px] text-sm leading-6 text-slate-500 line-clamp-2">
+                    {product.description}
+                  </p>
+
+                  {product.dosage && (
+                    <div className="mb-4 inline-flex max-w-full items-center rounded-full bg-slate-100/90 px-3 py-1 text-xs font-medium text-slate-500">
+                      <span className="truncate">{product.dosage}</span>
+                    </div>
+                  )}
+
+                  <div className="flex items-end justify-between gap-4 border-t border-slate-100 pt-4">
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">
+                        Price
+                      </p>
+                      <p className="text-3xl font-bold tracking-tight text-slate-900">
+                        ₹{product.price.toFixed(2)}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-1 text-sm font-semibold text-emerald-600">
+                      <span>View Details</span>
+                      <ChevronRight size={16} className="transition-transform duration-300 group-hover:translate-x-1" />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="hidden relative aspect-square rounded-xl overflow-hidden mb-4 bg-slate-50">
                   <img 
                     src={product.image} 
                     alt={product.name}
@@ -532,11 +1183,6 @@ export default function App() {
                       e.currentTarget.src = `https://picsum.photos/seed/${product.id}/400/400`;
                     }}
                   />
-                  {product.requiresPrescription && (
-                    <div className="absolute top-2 right-2 bg-amber-100 text-amber-700 text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1">
-                      <AlertCircle size={10} /> Prescription Required
-                    </div>
-                  )}
                   {(user?.role === 'admin' || user?.role === 'owner') && (
                     <button 
                       onClick={(e) => {
@@ -561,7 +1207,7 @@ export default function App() {
                     <Heart size={18} fill={wishlist.includes(product.id) ? 'currentColor' : 'none'} />
                   </button>
                 </div>
-                <div className="space-y-1">
+                <div className="hidden space-y-1">
                   <span className="text-[10px] font-bold text-primary uppercase tracking-wider">{product.category}</span>
                   <h3 className="font-semibold text-slate-800 line-clamp-1">{product.name}</h3>
                   <p className="text-xs text-slate-500 line-clamp-2 h-8">{product.description}</p>
@@ -587,23 +1233,23 @@ export default function App() {
 
       {/* Features Bar */}
       <section className="bg-white border-t border-slate-200 py-12 px-4 md:px-8">
-        <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-4 gap-8">
+        <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8">
           <div className="flex items-start gap-4">
             <div className="p-3 bg-primary-light text-primary rounded-2xl">
-              <Truck size={24} />
+              <ShieldCheck size={24} />
             </div>
             <div>
-              <h4 className="font-bold">Fast Delivery</h4>
-              <p className="text-sm text-slate-500">Same day delivery in major cities</p>
+              <h4 className="font-bold">Premium Medical Equipment</h4>
+              <p className="text-sm text-slate-500">Advanced probes and diagnostic devices</p>
             </div>
           </div>
           <div className="flex items-start gap-4">
             <div className="p-3 bg-blue-50 text-blue-500 rounded-2xl">
-              <ShieldCheck size={24} />
+              <Check size={24} />
             </div>
             <div>
               <h4 className="font-bold">100% Authentic</h4>
-              <p className="text-sm text-slate-500">Products sourced directly from brands</p>
+              <p className="text-sm text-slate-500">Products sourced directly from verified brands</p>
             </div>
           </div>
           <div className="flex items-start gap-4">
@@ -612,16 +1258,7 @@ export default function App() {
             </div>
             <div>
               <h4 className="font-bold">24/7 Support</h4>
-              <p className="text-sm text-slate-500">Expert pharmacists available always</p>
-            </div>
-          </div>
-          <div className="flex items-start gap-4">
-            <div className="p-3 bg-purple-50 text-purple-500 rounded-2xl">
-              <CheckCircle2 size={24} />
-            </div>
-            <div>
-              <h4 className="font-bold">Easy Returns</h4>
-              <p className="text-sm text-slate-500">No questions asked 7-day returns</p>
+              <p className="text-sm text-slate-500">Expert medical consultants available always</p>
             </div>
           </div>
         </div>
@@ -644,34 +1281,80 @@ export default function App() {
           <div>
             <h4 className="text-white font-bold mb-6">Quick Links</h4>
             <ul className="space-y-4 text-sm">
-              <li><a href="#" className="hover:text-primary transition-colors">About Us</a></li>
-              <li><a href="#" className="hover:text-primary transition-colors">Contact Us</a></li>
-              <li><a href="#" className="hover:text-primary transition-colors">Privacy Policy</a></li>
-              <li><a href="#" className="hover:text-primary transition-colors">Terms of Service</a></li>
+              <li><motion.a 
+                href="#" 
+                whileHover={{ scale: 1.05, color: '#10b981' }}
+                whileTap={{ scale: 0.95 }}
+                className="hover:text-primary transition-colors inline-block"
+              >About Us</motion.a></li>
+              <li><motion.a 
+                href="#" 
+                whileHover={{ scale: 1.05, color: '#10b981' }}
+                whileTap={{ scale: 0.95 }}
+                className="hover:text-primary transition-colors inline-block"
+              >Contact Us</motion.a></li>
+              <li><motion.a 
+                href="#" 
+                whileHover={{ scale: 1.05, color: '#10b981' }}
+                whileTap={{ scale: 0.95 }}
+                className="hover:text-primary transition-colors inline-block"
+              >Privacy Policy</motion.a></li>
+              <li><motion.a 
+                href="#" 
+                whileHover={{ scale: 1.05, color: '#10b981' }}
+                whileTap={{ scale: 0.95 }}
+                className="hover:text-primary transition-colors inline-block"
+              >Terms of Service</motion.a></li>
             </ul>
           </div>
           <div>
             <h4 className="text-white font-bold mb-6">Categories</h4>
             <ul className="space-y-4 text-sm">
-              <li><a href="#" className="hover:text-primary transition-colors">Medicines</a></li>
-              <li><a href="#" className="hover:text-primary transition-colors">Vitamins</a></li>
-              <li><a href="#" className="hover:text-primary transition-colors">Baby Care</a></li>
-              <li><a href="#" className="hover:text-primary transition-colors">Personal Care</a></li>
+              <li><motion.button 
+                onClick={() => {
+                  setActiveCategory('Medicines');
+                  document.getElementById('products-section')?.scrollIntoView({ behavior: 'smooth' });
+                }}
+                whileHover={{ scale: 1.05, color: '#10b981' }}
+                whileTap={{ scale: 0.95 }}
+                className="hover:text-primary transition-colors inline-block text-left bg-none border-none cursor-pointer p-0"
+              >Medicines</motion.button></li>
+              <li><motion.button 
+                onClick={() => {
+                  setActiveCategory('Vitamins');
+                  document.getElementById('products-section')?.scrollIntoView({ behavior: 'smooth' });
+                }}
+                whileHover={{ scale: 1.05, color: '#10b981' }}
+                whileTap={{ scale: 0.95 }}
+                className="hover:text-primary transition-colors inline-block text-left bg-none border-none cursor-pointer p-0"
+              >Vitamins</motion.button></li>
+              <li><motion.button 
+                onClick={() => {
+                  setActiveCategory('Baby Care');
+                  document.getElementById('products-section')?.scrollIntoView({ behavior: 'smooth' });
+                }}
+                whileHover={{ scale: 1.05, color: '#10b981' }}
+                whileTap={{ scale: 0.95 }}
+                className="hover:text-primary transition-colors inline-block text-left bg-none border-none cursor-pointer p-0"
+              >Baby Care</motion.button></li>
+              <li><motion.button 
+                onClick={() => {
+                  setActiveCategory('Personal Care');
+                  document.getElementById('products-section')?.scrollIntoView({ behavior: 'smooth' });
+                }}
+                whileHover={{ scale: 1.05, color: '#10b981' }}
+                whileTap={{ scale: 0.95 }}
+                className="hover:text-primary transition-colors inline-block text-left bg-none border-none cursor-pointer p-0"
+              >Personal Care</motion.button></li>
             </ul>
           </div>
           <div>
-            <h4 className="text-white font-bold mb-6">Newsletter</h4>
-            <p className="text-sm mb-4">Subscribe to get health tips and exclusive offers.</p>
-            <div className="flex gap-2">
-              <input 
-                type="email" 
-                placeholder="Your email"
-                className="bg-slate-800 border-none rounded-lg px-4 py-2 text-sm w-full focus:ring-1 focus:ring-primary outline-none"
-              />
-              <button className="p-2 bg-primary text-white rounded-lg hover:bg-primary-dark transition-colors">
-                <ChevronRight size={20} />
-              </button>
-            </div>
+            <h4 className="text-white font-bold mb-6">Contact Info</h4>
+            <p className="text-sm mb-4">
+              <span className="block mb-3">Email: Ohmsivamurugamedicals@gmail.com</span>
+              <span className="block mb-3">Phone: 9994687690</span>
+              <span className="block">Location: 8/94, Trichy Rd, Thottiyam, Tamil Nadu 621215, India</span>
+            </p>
           </div>
         </div>
         <div className="max-w-7xl mx-auto mt-16 pt-8 border-t border-slate-800 text-center text-xs">
@@ -768,7 +1451,9 @@ export default function App() {
                     <img 
                       src={selectedProduct.image} 
                       alt={selectedProduct.name}
-                      className="w-full h-full object-contain max-h-[400px] rounded-2xl shadow-lg"
+                      className={`w-full h-full object-contain max-h-[400px] rounded-2xl shadow-lg transition-[filter] duration-300 ${
+                        isShopAvailable ? 'grayscale-0' : 'grayscale'
+                      }`}
                       referrerPolicy="no-referrer"
                       onError={(e) => {
                         e.currentTarget.src = `https://picsum.photos/seed/${selectedProduct.id}/800/800`;
@@ -792,11 +1477,6 @@ export default function App() {
                   <h2 className="text-3xl font-bold text-slate-900 mb-4">{selectedProduct.name}</h2>
                   <div className="flex items-center gap-4 mb-6">
                     <span className="text-3xl font-bold text-slate-900">₹{selectedProduct.price.toFixed(2)}</span>
-                    {selectedProduct.requiresPrescription && (
-                      <div className="bg-amber-100 text-amber-700 text-xs font-bold px-3 py-1.5 rounded-full flex items-center gap-2">
-                        <AlertCircle size={14} /> Prescription Required
-                      </div>
-                    )}
                   </div>
                   
                   <div className="space-y-4 mb-8">
@@ -903,7 +1583,7 @@ export default function App() {
                       </button>
                     </div>
 
-                    {user?.role === 'admin' && (
+                    {(user?.role === 'admin' || user?.role === 'owner') && (
                       <div className="text-left px-1 pt-2">
                         <p className="text-[10px] font-bold text-blue-500 uppercase tracking-wider mb-2">Admin Controls</p>
                         <button 
@@ -914,6 +1594,15 @@ export default function App() {
                           className="w-full py-3 bg-blue-50 text-blue-600 rounded-xl font-semibold hover:bg-blue-100 transition-all flex items-center justify-center gap-2"
                         >
                           <Shield size={18} /> Reset Owner Password
+                        </button>
+                        <button 
+                          onClick={() => {
+                            setIsLoginOpen(false);
+                            handleReseedCategories();
+                          }}
+                          className="w-full mt-2 py-3 bg-green-50 text-green-600 rounded-xl font-semibold hover:bg-green-100 transition-all flex items-center justify-center gap-2"
+                        >
+                          <Plus size={18} /> Load All Categories
                         </button>
                       </div>
                     )}
@@ -1373,26 +2062,94 @@ export default function App() {
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 onClick={() => setIsAddProductOpen(false)}
-                className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+                className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm"
               />
               <motion.div 
-                initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                className="relative bg-white rounded-3xl shadow-2xl max-w-lg w-full overflow-hidden flex flex-col max-h-[90vh]"
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                transition={{ type: "spring", damping: 25, stiffness: 300 }}
+                className="relative bg-white rounded-3xl shadow-2xl max-w-lg w-full overflow-y-auto flex flex-col max-h-[90vh]"
               >
-                <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-white">
-                  <h3 className="text-xl font-bold flex items-center gap-2">
-                    <Plus size={20} className="text-emerald-500" /> Add New Medicine
-                  </h3>
-                  <button onClick={() => setIsAddProductOpen(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
-                    <X size={20} />
-                  </button>
-                </div>
+                <motion.div 
+                  initial={{ opacity: 0, y: -20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.15, duration: 0.5 }}
+                  className="sticky top-0 bg-gradient-to-r from-emerald-50 via-white to-slate-50 p-6 border-b-2 border-slate-100 flex items-center justify-between rounded-t-3xl z-10 overflow-hidden relative"
+                >
+                  {/* Animated background shimmer */}
+                  <motion.div
+                    className="absolute inset-0 bg-gradient-to-r from-transparent via-white to-transparent opacity-50"
+                    animate={{ x: ['-100%', '100%'] }}
+                    transition={{ duration: 3, repeat: Infinity }}
+                  />
 
-                <form onSubmit={handleAddProduct} className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar">
+                  {/* Left side - Icon and Title */}
+                  <motion.div 
+                    className="flex items-center gap-3 relative z-10"
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: 0.2, duration: 0.5 }}
+                  >
+                    {/* Rotating Plus Icon with pulse */}
+                    <motion.div
+                      className="p-2 bg-emerald-100 rounded-full"
+                      animate={{ 
+                        rotate: 360,
+                        boxShadow: [
+                          "0 0 0 0 rgba(16, 185, 129, 0.6)",
+                          "0 0 0 12px rgba(16, 185, 129, 0)",
+                        ]
+                      }}
+                      transition={{ 
+                        rotate: { duration: 3, repeat: Infinity, ease: "linear" },
+                        boxShadow: { duration: 2, repeat: Infinity }
+                      }}
+                    >
+                      <Plus size={20} className="text-emerald-600" />
+                    </motion.div>
+
+                    {/* Animated Title */}
+                    <motion.div
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: 0.3, duration: 0.6 }}
+                      className="flex flex-col"
+                    >
+                      <h3 className="text-xl font-bold bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-600 bg-clip-text text-transparent">
+                        Add New Medicine
+                      </h3>
+                      <motion.div
+                        className="h-1 bg-gradient-to-r from-emerald-400 to-transparent rounded-full"
+                        initial={{ scaleX: 0 }}
+                        animate={{ scaleX: 1 }}
+                        transition={{ delay: 0.5, duration: 0.7 }}
+                        style={{ originX: 0 }}
+                      />
+                    </motion.div>
+                  </motion.div>
+
+                  {/* Right side - Close Button */}
+                  <motion.button 
+                    onClick={() => setIsAddProductOpen(false)} 
+                    className="relative z-10 p-2 rounded-full transition-all"
+                    initial={{ opacity: 0, scale: 0, rotate: -180 }}
+                    animate={{ opacity: 1, scale: 1, rotate: 0 }}
+                    transition={{ delay: 0.4, duration: 0.5, type: "spring" }}
+                    whileHover={{ 
+                      scale: 1.2,
+                      backgroundColor: "rgba(226, 232, 240, 0.9)",
+                      rotateZ: 90
+                    }}
+                    whileTap={{ scale: 0.8 }}
+                  >
+                    <X size={20} className="text-slate-600" />
+                  </motion.button>
+                </motion.div>
+
+                <form onSubmit={handleAddProduct} className="p-6 space-y-6">
                   <div className="space-y-4">
-                    <div className="space-y-1">
+                    <div className="space-y-2">
                       <label className="text-xs font-bold text-slate-500 uppercase">Medicine Name</label>
                       <div className="relative">
                         <Tag className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
@@ -1408,33 +2165,35 @@ export default function App() {
                     </div>
 
                     <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-1">
+                      <div className="space-y-2">
                         <label className="text-xs font-bold text-slate-500 uppercase">Category</label>
                         <select 
                           className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none transition-all bg-white"
                           value={newProduct.category}
                           onChange={(e) => setNewProduct({...newProduct, category: e.target.value})}
                         >
-                          {CATEGORIES.filter(c => c !== 'All').map(cat => (
+                          <option value="">Select category</option>
+                          {selectableCategories.map(cat => (
                             <option key={cat} value={cat}>{cat}</option>
                           ))}
                         </select>
                       </div>
-                      <div className="space-y-1">
+                      <div className="space-y-2">
                         <label className="text-xs font-bold text-slate-500 uppercase">Rate (₹)</label>
                         <input 
                           type="number" 
                           required
                           min="0"
+                          step="0.01"
                           value={newProduct.price}
                           onChange={(e) => setNewProduct({...newProduct, price: Number(e.target.value)})}
                           placeholder="0.00"
-                          className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none transition-all"
+                          className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none transition-all [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:display-none [&::-webkit-inner-spin-button]:display-none [&::-moz-appearance]:textfield"
                         />
                       </div>
                     </div>
 
-                    <div className="space-y-1">
+                    <div className="space-y-2">
                       <label className="text-xs font-bold text-slate-500 uppercase">Description</label>
                       <div className="relative">
                         <FileText className="absolute left-3 top-3 text-slate-400" size={18} />
@@ -1501,114 +2260,133 @@ export default function App() {
                         </div>
                       </div>
                     </div>
-
-                    <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-2xl">
-                      <input 
-                        type="checkbox" 
-                        id="requiresPrescription"
-                        checked={newProduct.requiresPrescription}
-                        onChange={(e) => setNewProduct({...newProduct, requiresPrescription: e.target.checked})}
-                        className="w-5 h-5 rounded text-primary focus:ring-primary"
-                      />
-                      <label htmlFor="requiresPrescription" className="text-sm font-medium text-slate-700 cursor-pointer">
-                        This product requires a prescription
-                      </label>
-                    </div>
                   </div>
 
-                  <div className="pt-4">
-                    <button 
-                      type="submit"
-                      className="w-full py-4 bg-emerald-500 text-white rounded-xl font-bold shadow-lg shadow-emerald-200 hover:bg-emerald-600 transition-all flex items-center justify-center gap-2"
-                    >
-                      <Plus size={20} /> Add Product to Store
-                    </button>
-                  </div>
+                  <motion.button 
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    type="submit"
+                    className="w-full py-4 bg-emerald-500 text-white rounded-xl font-bold shadow-lg shadow-emerald-200 hover:bg-emerald-600 transition-all flex items-center justify-center gap-2"
+                  >
+                    <Plus size={20} /> Add Product to Store
+                  </motion.button>
                 </form>
               </motion.div>
             </div>
           )}
         </AnimatePresence>
 
-      {/* AI Assistant Chat Widget */}
-      <div className="fixed bottom-6 right-6 z-40 flex flex-col items-end gap-4">
-        <AnimatePresence>
-          {isChatOpen && (
-            <motion.div 
-              initial={{ opacity: 0, y: 20, scale: 0.95 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 20, scale: 0.95 }}
-              className="w-full max-w-[350px] md:max-w-[400px] h-[500px] bg-white rounded-3xl shadow-2xl border border-slate-100 flex flex-col overflow-hidden"
-            >
-              <div className="p-4 bg-primary text-white flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center">
-                    <ShieldCheck size={18} />
-                  </div>
-                  <div>
-                    <h4 className="font-bold text-sm">Health Assistant</h4>
-                    <div className="flex items-center gap-1 text-[10px] opacity-80">
-                      <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
-                      Online
-                    </div>
-                  </div>
-                </div>
-                <button onClick={() => setIsChatOpen(false)} className="p-1 hover:bg-white/10 rounded-full transition-colors">
-                  <X size={20} />
-                </button>
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[85%] p-3 rounded-2xl text-sm ${
-                      msg.role === 'user' 
-                      ? 'bg-primary text-white rounded-tr-none' 
-                      : 'bg-slate-100 text-slate-800 rounded-tl-none'
-                    }`}>
-                      {msg.text}
-                    </div>
-                  </div>
-                ))}
-                {isTyping && (
-                  <div className="flex justify-start">
-                    <div className="bg-slate-100 p-3 rounded-2xl rounded-tl-none flex gap-1">
-                      <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" />
-                      <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce [animation-delay:0.2s]" />
-                      <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce [animation-delay:0.4s]" />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="p-4 border-t border-slate-100 flex gap-2">
-                <input 
-                  type="text" 
-                  placeholder="Ask about symptoms or meds..."
-                  className="flex-1 bg-slate-50 border-none rounded-xl px-4 py-2 text-sm focus:ring-1 focus:ring-primary outline-none"
-                  value={userInput}
-                  onChange={(e) => setUserInput(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                />
-                <button 
-                  onClick={handleSendMessage}
-                  disabled={!userInput.trim() || isTyping}
-                  className="p-2 bg-primary text-white rounded-xl hover:bg-primary-dark transition-colors disabled:opacity-50"
-                >
-                  <Send size={18} />
-                </button>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        <button 
-          onClick={() => setIsChatOpen(!isChatOpen)}
-          className="w-14 h-14 bg-primary text-white rounded-full shadow-xl shadow-primary/40 flex items-center justify-center hover:scale-110 transition-transform active:scale-95"
+      {/* Add Category Modal */}
+      {isAddCategoryOpen && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.2 }}
+          className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          onClick={() => setIsAddCategoryOpen(false)}
         >
-          {isChatOpen ? <X size={24} /> : <MessageSquare size={24} />}
-        </button>
-      </div>
+          <motion.div
+            initial={{ scale: 0.9, opacity: 0, y: 20 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            exit={{ scale: 0.9, opacity: 0, y: 20 }}
+            transition={{ type: "spring", damping: 20, stiffness: 300 }}
+            className="bg-gradient-to-br from-white to-slate-50 rounded-3xl shadow-2xl max-w-md w-full overflow-hidden border border-slate-200/50"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header with icon */}
+            <div className="flex items-center justify-between p-6 bg-gradient-to-r from-primary/10 to-emerald-50 border-b border-slate-200/50">
+              <div className="flex items-center gap-3">
+                <motion.div
+                  animate={{ rotate: 360 }}
+                  transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+                  className="p-2 bg-primary/20 rounded-full"
+                >
+                  <Plus size={24} className="text-primary" />
+                </motion.div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-primary to-emerald-600 bg-clip-text text-transparent">Add Category</h2>
+              </div>
+              <motion.button
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => setIsAddCategoryOpen(false)}
+                className="p-2 hover:bg-slate-200/50 rounded-full transition-colors"
+              >
+                <X size={24} className="text-slate-600" />
+              </motion.button>
+            </div>
+            
+            <form onSubmit={handleAddCategory} className="p-8 space-y-6">
+              <div className="space-y-3">
+                <motion.label 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: 0.1 }}
+                  className="text-sm font-bold text-slate-700 flex items-center gap-2"
+                >
+                  <span className="w-2 h-2 bg-primary rounded-full" />
+                  Category Name
+                </motion.label>
+                <motion.input
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.15 }}
+                  type="text"
+                  value={newCategoryName}
+                  onChange={(e) => setNewCategoryName(e.target.value)}
+                  placeholder="e.g., Vitamins, Supplements..."
+                  className="w-full px-4 py-3.5 rounded-xl border-2 border-slate-200 focus:border-primary focus:ring-4 focus:ring-primary/20 outline-none transition-all bg-white/80 backdrop-blur-sm font-medium"
+                  required
+                  autoFocus
+                />
+              </div>
+
+              <div className="flex gap-3 pt-4">
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  type="button"
+                  onClick={() => setIsAddCategoryOpen(false)}
+                  className="flex-1 px-4 py-3 rounded-xl border-2 border-slate-200 text-slate-900 font-bold hover:bg-slate-50 transition-all"
+                >
+                  Cancel
+                </motion.button>
+                <motion.button
+                  whileHover={{ scale: 1.02, boxShadow: "0 10px 20px rgba(16, 185, 129, 0.3)" }}
+                  whileTap={{ scale: 0.98 }}
+                  type="submit"
+                  className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-primary to-emerald-600 text-white font-bold hover:shadow-lg transition-all flex items-center justify-center gap-2"
+                >
+                  <motion.span
+                    animate={{ y: [0, -2, 0] }}
+                    transition={{ duration: 2, repeat: Infinity }}
+                  >
+                    ✓
+                  </motion.span>
+                  Create Category
+                </motion.button>
+              </div>
+            </form>
+
+            {/* Decorative elements */}
+            <motion.div
+              className="absolute top-0 right-0 w-40 h-40 bg-primary/5 rounded-full blur-3xl"
+              animate={{ x: [0, 20, 0], y: [0, -20, 0] }}
+              transition={{ duration: 4, repeat: Infinity }}
+            />
+            <motion.div
+              className="absolute bottom-0 left-0 w-32 h-32 bg-emerald-300/5 rounded-full blur-3xl"
+              animate={{ x: [0, -20, 0], y: [0, 20, 0] }}
+              transition={{ duration: 5, repeat: Infinity }}
+            />
+          </motion.div>
+        </motion.div>
+      )}
+
+
     </div>
   );
 }
+
+
+
