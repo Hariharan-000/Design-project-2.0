@@ -29,6 +29,22 @@ import {
   deleteCategory
 } from './src/database';
 
+// In-memory token store (maps token -> user data)
+// In production, use Redis or a database
+const tokenStore = new Map<string, { userId: string; email: string; name: string; role: string; avatar?: string; timestamp: number }>();
+
+const TOKEN_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+// Clean up expired tokens periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, data] of tokenStore.entries()) {
+    if (now - data.timestamp > TOKEN_EXPIRY_MS) {
+      tokenStore.delete(token);
+    }
+  }
+}, 60 * 60 * 1000); // Every hour
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -99,6 +115,16 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
 
     // Generate token
     const token = crypto.randomBytes(32).toString('hex');
+    
+    // Store token with user data
+    tokenStore.set(token, {
+      userId: user._id.toString(),
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      avatar: user.avatar,
+      timestamp: Date.now()
+    });
 
     res.json({
       success: true,
@@ -113,6 +139,58 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     res.status(401).json({ error: error.message });
+  }
+});
+
+// Validate token and restore session
+app.post('/api/auth/validate', async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    const token = authHeader.substring(7);
+    const userData = tokenStore.get(token);
+
+    if (!userData) {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+
+    // Check if token is expired
+    if (Date.now() - userData.timestamp > TOKEN_EXPIRY_MS) {
+      tokenStore.delete(token);
+      return res.status(401).json({ error: 'Token expired' });
+    }
+
+    // Return user data
+    res.json({
+      success: true,
+      user: {
+        id: userData.userId,
+        name: userData.name,
+        email: userData.email,
+        role: userData.role,
+        avatar: userData.avatar
+      },
+      token
+    });
+  } catch (error: any) {
+    res.status(401).json({ error: error.message });
+  }
+});
+
+// Logout user (invalidate token)
+app.post('/api/auth/logout', (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+      tokenStore.delete(token);
+    }
+    res.json({ success: true, message: 'Logged out successfully' });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message });
   }
 });
 

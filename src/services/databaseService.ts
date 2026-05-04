@@ -75,9 +75,23 @@ export async function loginUser(email: string, password: string): Promise<AuthRe
   }
 }
 
-export function logoutUser() {
-  localStorage.removeItem('authToken');
-  localStorage.removeItem('currentUser');
+export async function logoutUser() {
+  try {
+    const token = localStorage.getItem('authToken');
+    if (token) {
+      // Notify backend to invalidate token
+      await fetch(`${API_BASE_URL}/auth/logout`, {
+        method: 'POST',
+        headers: getAuthHeaders()
+      });
+    }
+  } catch (error) {
+    console.error('Error calling backend logout:', error);
+  } finally {
+    // Always clear local storage
+    localStorage.removeItem('authToken');
+    localStorage.removeItem('currentUser');
+  }
 }
 
 // ============ USER MANAGEMENT ============
@@ -208,6 +222,56 @@ export function getCurrentUser(): User | null {
 
 export function getAuthToken(): string | null {
   return localStorage.getItem('authToken');
+}
+
+export async function validateAndRestoreSession(): Promise<AuthResponse> {
+  try {
+    const token = getAuthToken();
+    if (!token) {
+      return { success: false, user: {} as User, error: 'No token found' };
+    }
+
+    const response = await fetch(`${API_BASE_URL}/auth/validate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    const data = await response.json();
+    
+    if (!response.ok) {
+      // Token is invalid, clear localStorage
+      localStorage.removeItem('authToken');
+      localStorage.removeItem('currentUser');
+      return { success: false, user: {} as User, error: 'Token validation failed' };
+    }
+
+    // Save the restored user
+    if (data.user) {
+      localStorage.setItem('currentUser', JSON.stringify(data.user));
+    }
+
+    return data;
+  } catch (error: any) {
+    console.error('Session restoration failed:', error);
+    localStorage.removeItem('authToken');
+    localStorage.removeItem('currentUser');
+    return { success: false, user: {} as User, error: error.message };
+  }
+}
+
+// Helper function to add auth header to requests
+export function getAuthHeaders(): HeadersInit {
+  const token = getAuthToken();
+  const headers: HeadersInit = {
+    'Content-Type': 'application/json'
+  };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return headers;
 }
 
 export async function checkServerHealth(): Promise<boolean> {

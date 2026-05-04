@@ -109,10 +109,7 @@ app.get('/api/products/:id', async (req: Request, res: Response) => {
  * Body: {
  *   name: string,
  *   category: string,
- *   price: number,
- *   description: string,
- *   image: string (base64 or URL),
- *   requiresPrescription?: boolean,
+ *   prPrescription?: boolean,
  *   dosage?: string
  * }
  */

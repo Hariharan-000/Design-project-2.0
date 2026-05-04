@@ -37,6 +37,8 @@ import {
   registerUser,
   saveCurrentUser,
   updateUserProfile,
+  validateAndRestoreSession,
+  getAuthHeaders,
   type User as PersistedUser
 } from './services/databaseService';
 
@@ -258,7 +260,8 @@ export default function App() {
     if (confirm('Are you sure you want to delete this product?')) {
       try {
         const response = await fetch(`${API_BASE_URL}/products/${productId}`, {
-          method: 'DELETE'
+          method: 'DELETE',
+          headers: getAuthHeaders()
         });
 
         const data = await readJsonSafely(response);
@@ -376,6 +379,31 @@ export default function App() {
     requiresPrescription: false
   });
 
+  // Restore user session from localStorage on app mount
+  useEffect(() => {
+    const restoreSession = async () => {
+      try {
+        const result = await validateAndRestoreSession();
+        if (result.success && result.user) {
+          const nextUser = toAppUser(result.user);
+          setUser(nextUser);
+          setIsLoggedIn(true);
+          console.log('✅ Session restored for user:', nextUser.email);
+        } else {
+          // No valid session
+          setUser(null);
+          setIsLoggedIn(false);
+        }
+      } catch (error) {
+        console.error('Failed to restore session:', error);
+        setUser(null);
+        setIsLoggedIn(false);
+      }
+    };
+    
+    restoreSession();
+  }, []);
+
   // Load products and categories from MongoDB on component mount
   useEffect(() => {
     loadProducts();
@@ -429,9 +457,7 @@ export default function App() {
     try {
       const response = await fetch(`${API_BASE_URL}/categories`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           name: newCategoryName.trim(),
           user_id: user.email,
@@ -639,9 +665,7 @@ export default function App() {
       
       const response = await fetch(`${API_BASE_URL}/products`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: getAuthHeaders(),
         body: JSON.stringify(productData)
       });
 
@@ -879,6 +903,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    logoutUser();
     setIsLoggedIn(false);
     setUser(null);
     setLoginData({ email: '', password: '', name: '' });
