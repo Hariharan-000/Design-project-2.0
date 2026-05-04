@@ -5,11 +5,14 @@ import {defineConfig, loadEnv} from 'vite';
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
+  const isProduction = mode === 'production';
+  
   return {
     base: env.VITE_BASE_PATH || '/',
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+      'process.env.VITE_API_BASE_URL': JSON.stringify(env.VITE_API_BASE_URL || (isProduction ? 'https://your-backend-url.com/api' : 'http://localhost:5002/api')),
     },
     resolve: {
       alias: {
