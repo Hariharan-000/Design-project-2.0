@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+﻿import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { 
   Search, 
   ShoppingCart, 
@@ -27,7 +27,7 @@ import {
   Upload
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Product, MOCK_PRODUCTS, CATEGORIES, DEFAULT_DEMO_USERS } from './constants';
+import { Product, CATEGORIES, DEFAULT_DEMO_USERS } from './constants';
 import { getGeminiResponse } from './services/geminiService';
 import {
   getAllUsers as fetchAllUsers,
@@ -63,6 +63,69 @@ async function readJsonSafely(response: Response) {
     return JSON.parse(text);
   } catch {
     return null;
+  }
+}
+
+const LOCAL_IMAGE_MANIFEST_URL = '/images/manifest.json';
+const LOCAL_FALLBACK_CATEGORIES = CATEGORIES.filter((category) => category !== 'All');
+
+function buildLocalProductName(fileName: string, index: number) {
+  const withoutExtension = fileName.replace(/\.[^/.]+$/, '');
+  const cleanedName = withoutExtension
+    .replace(/\bwhatsapp image\b/gi, '')
+    .replace(/\bat\b/gi, ' ')
+    .replace(/\b\d{4}[-.]\d{2}[-.]\d{2}\b/g, ' ')
+    .replace(/\b\d{1,2}[.:]\d{2}[.:]\d{2}\b/g, ' ')
+    .replace(/\b\d+\b/g, ' ')
+    .replace(/[()]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleanedName) {
+    return `Store Product ${index + 1}`;
+  }
+
+  return cleanedName;
+}
+
+function buildLocalImageProducts(fileNames: string[]): Product[] {
+  return fileNames.map((fileName, index) => {
+    const category = LOCAL_FALLBACK_CATEGORIES[index % LOCAL_FALLBACK_CATEGORIES.length] || 'Personal Care';
+    const name = buildLocalProductName(fileName, index);
+    const price = 99 + (index % 15) * 25;
+
+    return {
+      id: `local-image-${index + 1}`,
+      name,
+      category,
+      price,
+      description: 'Product imported from local images folder.',
+      image: `/images/${encodeURIComponent(fileName)}`,
+      requiresPrescription: false
+    };
+  });
+}
+
+async function loadLocalImageProducts(): Promise<Product[]> {
+  try {
+    const response = await fetch(LOCAL_IMAGE_MANIFEST_URL, { cache: 'no-store' });
+    if (!response.ok) {
+      return [];
+    }
+
+    const data = await readJsonSafely(response);
+    if (!data || !Array.isArray(data.files)) {
+      return [];
+    }
+
+    const files = data.files.filter(
+      (fileName: unknown): fileName is string => typeof fileName === 'string' && fileName.trim().length > 0
+    );
+
+    return buildLocalImageProducts(files);
+  } catch (error) {
+    console.error('Failed to load local image products:', error);
+    return [];
   }
 }
 
@@ -216,7 +279,7 @@ export default function App() {
 
     if (confirm('Are you sure you want to delete this product?')) {
       try {
-        console.log(`\n🗑️ [Frontend] Deleting product: ${productId}`);
+        console.log(`\nðŸ—‘ï¸ [Frontend] Deleting product: ${productId}`);
         
         const response = await fetch(`${API_BASE_URL}/products/${productId}`, {
           method: 'DELETE'
@@ -224,27 +287,27 @@ export default function App() {
 
         
         const data = await readJsonSafely(response);
-          console.error('   ❌ Failed to parse response:', jsonError.message);
+          console.error('   âŒ Failed to parse response:', jsonError.message);
         }
 
         // Check if operation was successful
         if (!response.ok) {
-          console.error(`   ❌ HTTP Error: ${response.status} - ${data.error}`);
+          console.error(`   âŒ HTTP Error: ${response.status} - ${data.error}`);
           throw new Error(data.error || `HTTP ${response.status}`);
         }
 
         if (data.success) {
-          console.log(`   ✅ Product deleted from database`);
+          console.log(`   âœ… Product deleted from database`);
           // Reload products from backend to ensure consistency
           await loadProducts();
           setSelectedProduct(null);
-          alert('✅ Product deleted successfully!');
+          alert('Product deleted successfully!');
         } else {
-          console.error(`   ❌ Delete failed: ${data.error}`);
+          console.error(`   âŒ Delete failed: ${data.error}`);
           throw new Error(data.error || 'Failed to delete product');
         }
       } catch (error) {
-        console.error('❌ Failed to delete product:', error.message);
+        console.error('âŒ Failed to delete product:', error.message);
         alert(`Failed to delete product: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     }
@@ -390,7 +453,7 @@ export default function App() {
           const nextUser = toAppUser(result.user);
           setUser(nextUser);
           setIsLoggedIn(true);
-          console.log('✅ Session restored for user:', nextUser.email);
+          console.log('âœ… Session restored for user:', nextUser.email);
         } else {
           // No valid session
           setUser(null);
@@ -422,15 +485,19 @@ export default function App() {
         throw new Error(data?.error || `HTTP ${response.status}`);
       }
       console.log(`   ✅ Received ${data.products?.length || 0} products`);
+      const localProducts = await loadLocalImageProducts();
       if (data?.success && Array.isArray(data.products)) {
-        setProducts(data.products.map(normalizeProduct));
-      } else {
-        console.warn('   ⚠️ No products in response');
-        setProducts(MOCK_PRODUCTS.map(normalizeProduct));
+        const backendProducts = data.products.map(normalizeProduct);
+        setProducts([...backendProducts, ...localProducts]);
+        return;
       }
+
+      console.warn('   ⚠️ No backend products found, loading local image products...');
+      setProducts(localProducts);
     } catch (error) {
       console.error('   ❌ Failed to load products:', error);
-      setProducts(MOCK_PRODUCTS.map(normalizeProduct));
+      const localProducts = await loadLocalImageProducts();
+      setProducts(localProducts);
     }
   };
 
@@ -452,7 +519,7 @@ export default function App() {
   // Add new category (admin/owner only)
   const handleAddCategory = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newCategoryName.trim() || !user || (user.role !== 'admin' && user.role !== 'owner')) {
+    if (!newCategoryName.trim() || !user) {
       return;
     }
 
@@ -511,7 +578,7 @@ export default function App() {
       if (data.success) {
         // Reload categories
         await loadCategories();
-        alert('✅ All categories have been loaded! ' + data.categories.length + ' categories available.');
+        alert('All categories have been loaded! ' + data.categories.length + ' categories available.');
       } else {
         alert('Error: ' + data.error);
       }
@@ -538,7 +605,7 @@ export default function App() {
     }
 
     try {
-      console.log(`\n🗑️ [Frontend] Deleting category: "${categoryName}"`);
+      console.log(`\nðŸ—‘ï¸ [Frontend] Deleting category: "${categoryName}"`);
       console.log(`   User: ${user.email}`);
       console.log(`   Role: ${user.role}`);
       
@@ -559,7 +626,7 @@ export default function App() {
 
       // Check if response is ok
       if (!response.ok) {
-        console.error(`   ❌ HTTP Error: ${response.status}`);
+        console.error(`   âŒ HTTP Error: ${response.status}`);
       }
 
       // Try to parse response
@@ -568,26 +635,26 @@ export default function App() {
         data = await response.json();
         console.log(`   Response data:`, data);
       } catch (jsonError) {
-        console.error('   ❌ Response is not valid JSON:', jsonError);
+        console.error('   âŒ Response is not valid JSON:', jsonError);
         const text = await response.text();
         console.error('   Response text:', text);
         throw new Error('Server returned invalid response. Check server logs.');
       }
       
       if (data.success) {
-        console.log(`   ✅ Category deleted successfully!`);
+        console.log(`   âœ… Category deleted successfully!`);
         // Reload categories and reset to "All" if current category was deleted
         await loadCategories();
         if (activeCategory === categoryName) {
           setActiveCategory('All');
         }
-        alert(`✅ Category "${categoryName}" deleted successfully!`);
+        alert(`âœ… Category "${categoryName}" deleted successfully!`);
       } else {
-        console.error(`   ❌ Delete failed: ${data.error}`);
+        console.error(`   âŒ Delete failed: ${data.error}`);
         alert(`Error: ${data.error || 'Failed to delete category'}`);
       }
     } catch (error) {
-      console.error('❌ [Frontend] Failed to delete category:', error);
+      console.error('âŒ [Frontend] Failed to delete category:', error);
       alert(`Failed to delete category: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
@@ -646,7 +713,7 @@ export default function App() {
 
   const handleAddProduct = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newProduct.name || !newProduct.price || !newProduct.description) return;
+    if (!newProduct.name || !newProduct.price || !newProduct.description || !newProduct.image) return;
 
     try {
       const productData = {
@@ -654,12 +721,12 @@ export default function App() {
         category: newProduct.category || selectableCategories[0] || 'General',
         price: Number(newProduct.price),
         description: newProduct.description,
-        image: newProduct.image || 'https://images.unsplash.com/photo-1584308666721-bb8bd1f9913d?auto=format&fit=crop&q=80&w=400&h=400',
+        image: newProduct.image,
         requiresPrescription: false,
         dosage: newProduct.dosage || ''
       };
 
-      console.log('\n📝 [handleAddProduct] Adding new product:');
+      console.log('\nðŸ“ [handleAddProduct] Adding new product:');
       console.log('   Name:', productData.name);
       console.log('   Category:', productData.category);
       console.log('   Price:', productData.price);
@@ -678,13 +745,13 @@ export default function App() {
         data = await response.json();
         console.log('   Response data:', data);
       } catch (jsonError) {
-        console.error('   ❌ Failed to parse response:', jsonError.message);
+        console.error('   âŒ Failed to parse response:', jsonError.message);
         throw new Error('Invalid server response');
       }
       
       if (data.success && response.ok) {
-        console.log('   ✅ Product created with ID:', data.product._id);
-        console.log('   📦 Reloading products list...');
+        console.log('   âœ… Product created with ID:', data.product._id);
+        console.log('   ðŸ“¦ Reloading products list...');
         
         // Reload products from backend to ensure consistency
         await loadProducts();
@@ -699,13 +766,13 @@ export default function App() {
           image: '',
           requiresPrescription: false
         });
-        alert('✅ Product added successfully!');
+        alert('Product added successfully!');
       } else {
-        console.error('   ❌ Server error:', data.error);
+        console.error('   âŒ Server error:', data.error);
         alert('Error: ' + data.error);
       }
     } catch (error) {
-      console.error('❌ [handleAddProduct] Error:', error.message);
+      console.error('âŒ [handleAddProduct] Error:', error.message);
       alert('Failed to add product: ' + (error instanceof Error ? error.message : 'Unknown error'));
     }
   };
@@ -820,8 +887,8 @@ export default function App() {
         setOrders([{
           id: 'PH-82734',
           date: '01 Mar 2024',
-          items: [MOCK_PRODUCTS[0], MOCK_PRODUCTS[1]],
-          total: MOCK_PRODUCTS[0].price + MOCK_PRODUCTS[1].price,
+          items: [],
+          total: 0,
           status: 'Delivered',
           shipping: { name: 'System Admin', city: 'Mumbai' }
         }]);
@@ -851,8 +918,8 @@ export default function App() {
         setOrders([{
           id: 'PH-82734',
           date: '01 Mar 2024',
-          items: [MOCK_PRODUCTS[0], MOCK_PRODUCTS[1]],
-          total: MOCK_PRODUCTS[0].price + MOCK_PRODUCTS[1].price,
+          items: [],
+          total: 0,
           status: 'Delivered',
           shipping: { name: 'Store Owner', city: 'Mumbai' }
         }]);
@@ -872,8 +939,8 @@ export default function App() {
         setOrders([{
           id: 'PH-82734',
           date: '01 Mar 2024',
-          items: [MOCK_PRODUCTS[0], MOCK_PRODUCTS[1]],
-          total: MOCK_PRODUCTS[0].price + MOCK_PRODUCTS[1].price,
+          items: [],
+          total: 0,
           status: 'Delivered',
           shipping: { name: apiUser.name, city: 'Mumbai' }
         }]);
@@ -912,8 +979,8 @@ export default function App() {
       setOrders([{
         id: 'PH-82734',
         date: '01 Mar 2024',
-        items: [MOCK_PRODUCTS[0], MOCK_PRODUCTS[1]],
-        total: MOCK_PRODUCTS[0].price + MOCK_PRODUCTS[1].price,
+        items: [],
+        total: 0,
         status: 'Delivered',
         shipping: { name: registeredUser.name, city: 'Mumbai' }
       }]);
@@ -1001,7 +1068,7 @@ export default function App() {
         <div className="flex-1 space-y-6">
           <div className="space-y-3">
             <div className="inline-flex items-center gap-2 px-3 py-1 bg-primary-light text-primary-dark rounded-full text-sm font-semibold">
-              <Truck size={14} /> Free delivery on orders over ₹500
+              <Truck size={14} /> Free delivery on orders over 500
             </div>
             <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-semibold ${
               isShopAvailable 
@@ -1037,7 +1104,7 @@ export default function App() {
             className="rounded-3xl shadow-2xl object-cover w-full h-[400px]"
             referrerPolicy="no-referrer"
             onError={(e) => {
-              e.currentTarget.src = "https://picsum.photos/seed/medical/800/600";
+              e.currentTarget.style.display = 'none';
             }}
           />
         </div>
@@ -1173,7 +1240,7 @@ export default function App() {
                       className="h-full w-full object-contain drop-shadow-[0_20px_30px_rgba(15,23,42,0.14)] transition-transform duration-500 group-hover:scale-[1.06]"
                       referrerPolicy="no-referrer"
                       onError={(e) => {
-                        e.currentTarget.src = `https://picsum.photos/seed/${product.id}/400/400`;
+                        e.currentTarget.style.display = 'none';
                       }}
                     />
                   </div>
@@ -1210,7 +1277,7 @@ export default function App() {
                         Price
                       </p>
                       <p className="text-3xl font-bold tracking-tight text-slate-900">
-                        ₹{product.price.toFixed(2)}
+                        {product.price.toFixed(2)}
                       </p>
                     </div>
 
@@ -1228,7 +1295,7 @@ export default function App() {
                     className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
                     referrerPolicy="no-referrer"
                     onError={(e) => {
-                      e.currentTarget.src = `https://picsum.photos/seed/${product.id}/400/400`;
+                      e.currentTarget.style.display = 'none';
                     }}
                   />
                   {(user?.role === 'admin' || user?.role === 'owner') && (
@@ -1260,7 +1327,7 @@ export default function App() {
                   <h3 className="font-semibold text-slate-800 line-clamp-1">{product.name}</h3>
                   <p className="text-xs text-slate-500 line-clamp-2 h-8">{product.description}</p>
                   <div className="flex items-center justify-between pt-2">
-                    <span className="text-lg font-bold text-slate-900">₹{product.price.toFixed(2)}</span>
+                    <span className="text-lg font-bold text-slate-900">{product.price.toFixed(2)}</span>
                   </div>
                 </div>
               </motion.div>
@@ -1406,7 +1473,7 @@ export default function App() {
           </div>
         </div>
         <div className="max-w-7xl mx-auto mt-16 pt-8 border-t border-slate-800 text-center text-xs">
-          © 2024 E-pharmacy website. All rights reserved.
+          Â© 2024 E-pharmacy website. All rights reserved.
         </div>
       </footer>
 
@@ -1504,7 +1571,7 @@ export default function App() {
                       }`}
                       referrerPolicy="no-referrer"
                       onError={(e) => {
-                        e.currentTarget.src = `https://picsum.photos/seed/${selectedProduct.id}/800/800`;
+                        e.currentTarget.style.display = 'none';
                       }}
                     />
                     {(user?.role === 'admin' || user?.role === 'owner') && (
@@ -1524,7 +1591,7 @@ export default function App() {
                   <span className="text-xs font-bold text-primary uppercase tracking-widest mb-2 block">{selectedProduct.category}</span>
                   <h2 className="text-3xl font-bold text-slate-900 mb-4">{selectedProduct.name}</h2>
                   <div className="flex items-center gap-4 mb-6">
-                    <span className="text-3xl font-bold text-slate-900">₹{selectedProduct.price.toFixed(2)}</span>
+                    <span className="text-3xl font-bold text-slate-900">{selectedProduct.price.toFixed(2)}</span>
                   </div>
                   
                   <div className="space-y-4 mb-8">
@@ -1740,7 +1807,7 @@ export default function App() {
                           required
                           value={loginData.password}
                           onChange={(e) => setLoginData({...loginData, password: e.target.value})}
-                          placeholder="••••••••"
+                          placeholder="Enter password"
                           className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none transition-all"
                         />
                       </div>
@@ -1843,7 +1910,7 @@ export default function App() {
                               <p className="text-xs font-bold text-slate-800 truncate">{item.name}</p>
                               <p className="text-[10px] text-slate-500">Qty: {item.quantity}</p>
                             </div>
-                            <p className="text-xs font-bold text-slate-900">₹{(item.price * item.quantity).toFixed(2)}</p>
+                            <p className="text-xs font-bold text-slate-900">{(item.price * item.quantity).toFixed(2)}</p>
                           </div>
                         ))}
                       </div>
@@ -1854,7 +1921,7 @@ export default function App() {
                         </div>
                         <div className="text-right">
                           <p className="text-[10px] font-bold text-slate-400 uppercase">Total Paid</p>
-                          <p className="text-sm font-bold text-primary">₹{order.total.toFixed(2)}</p>
+                          <p className="text-sm font-bold text-primary">{order.total.toFixed(2)}</p>
                         </div>
                       </div>
                     </div>
@@ -1908,7 +1975,7 @@ export default function App() {
                   </div>
                 ) : (
                   wishlist.map(id => {
-                    const product = MOCK_PRODUCTS.find(p => p.id === id);
+                    const product = products.find(p => p.id === id);
                     if (!product) return null;
                     return (
                       <div key={id} className="flex gap-4 group">
@@ -1919,7 +1986,7 @@ export default function App() {
                             className="w-24 h-24 rounded-xl object-cover bg-slate-50"
                             referrerPolicy="no-referrer"
                             onError={(e) => {
-                              e.currentTarget.src = `https://picsum.photos/seed/${product.id}/200/200`;
+                              e.currentTarget.style.display = 'none';
                             }}
                           />
                           <button 
@@ -1933,7 +2000,7 @@ export default function App() {
                           <h4 className="font-semibold text-slate-800">{product.name}</h4>
                           <p className="text-xs text-slate-500">{product.category}</p>
                           <div className="flex items-center justify-between pt-2">
-                            <span className="font-bold text-slate-900">₹{product.price.toFixed(2)}</span>
+                            <span className="font-bold text-slate-900">{product.price.toFixed(2)}</span>
                           </div>
                         </div>
                       </div>
@@ -2227,7 +2294,7 @@ export default function App() {
                         </select>
                       </div>
                       <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-500 uppercase">Rate (₹)</label>
+                        <label className="text-xs font-bold text-slate-500 uppercase">Rate</label>
                         <input 
                           type="number" 
                           required
@@ -2405,12 +2472,12 @@ export default function App() {
                   type="submit"
                   className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-primary to-emerald-600 text-white font-bold hover:shadow-lg transition-all flex items-center justify-center gap-2"
                 >
-                  <motion.span
+                  <motion.div
                     animate={{ y: [0, -2, 0] }}
                     transition={{ duration: 2, repeat: Infinity }}
                   >
-                    ✓
-                  </motion.span>
+                    <Check size={16} />
+                  </motion.div>
                   Create Category
                 </motion.button>
               </div>
@@ -2435,6 +2502,7 @@ export default function App() {
     </div>
   );
 }
+
 
 
 

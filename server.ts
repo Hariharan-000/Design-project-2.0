@@ -474,15 +474,10 @@ app.get('/api/categories', async (req: Request, res: Response) => {
   }
 });
 
-// Add new category (admin/owner only)
+// Add new category (all users can create)
 app.post('/api/categories', async (req: Request, res: Response) => {
   try {
-    const { name, user_id, user_role } = req.body;
-
-    // Check if user is admin or owner
-    if (user_role !== 'admin' && user_role !== 'owner') {
-      return res.status(403).json({ error: 'Only admin and owner can create categories' });
-    }
+    const { name, user_id } = req.body;
 
     if (!name || name.trim() === '') {
       return res.status(400).json({ error: 'Category name is required' });
