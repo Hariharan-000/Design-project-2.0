@@ -27,7 +27,7 @@ import {
   Upload
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Product, MOCK_PRODUCTS, CATEGORIES } from './constants';
+import { Product, MOCK_PRODUCTS, CATEGORIES, DEFAULT_DEMO_USERS } from './constants';
 import { getGeminiResponse } from './services/geminiService';
 import {
   getAllUsers as fetchAllUsers,
@@ -149,7 +149,9 @@ export default function App() {
   const [isResetPasswordOpen, setIsResetPasswordOpen] = useState(false);
   const [newOwnerPassword, setNewOwnerPassword] = useState('');
   const [products, setProducts] = useState<Product[]>([]);
-  const [registeredUsers, setRegisteredUsers] = useState<{ email: string; password: string; name: string }[]>([]);
+  const [registeredUsers, setRegisteredUsers] = useState<{ email: string; password: string; name: string }[]>(
+    () => [...DEFAULT_DEMO_USERS]
+  );
   const [isShopAvailable, setIsShopAvailable] = useState(true);
   const [categories, setCategories] = useState<string[]>([]);
   const [isAddCategoryOpen, setIsAddCategoryOpen] = useState(false);
@@ -748,7 +750,7 @@ export default function App() {
     setIsProcessing(true);
     
     // Simulate login/signup
-    setTimeout(() => {
+    setTimeout(async () => {
       const emailLower = loginData.email.toLowerCase();
       const nameLower = loginData.name.toLowerCase();
 
@@ -861,7 +863,28 @@ export default function App() {
         return;
       }
 
-      // Check for REGISTERED CUSTOMER
+      // Try backend-authenticated customer login first (MongoDB users)
+      const apiLogin = await loginUser(loginData.email, loginData.password);
+      if (apiLogin.success && apiLogin.user) {
+        const apiUser = toAppUser(apiLogin.user);
+        setIsLoggedIn(true);
+        setUser(apiUser);
+        setOrders([{
+          id: 'PH-82734',
+          date: '01 Mar 2024',
+          items: [MOCK_PRODUCTS[0], MOCK_PRODUCTS[1]],
+          total: MOCK_PRODUCTS[0].price + MOCK_PRODUCTS[1].price,
+          status: 'Delivered',
+          shipping: { name: apiUser.name, city: 'Mumbai' }
+        }]);
+        setIsProcessing(false);
+        setIsLoginOpen(false);
+        setIsSignUp(false);
+        setLoginData({ email: '', password: '', name: '' });
+        return;
+      }
+
+      // Fallback: Check local REGISTERED CUSTOMER list
       const registeredUser = registeredUsers.find(u => u.email.toLowerCase() === emailLower);
       
       if (!registeredUser) {

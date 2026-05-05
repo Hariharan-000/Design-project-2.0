@@ -26,7 +26,8 @@ import {
   initializeCategories,
   getAllCategories,
   addCategory,
-  deleteCategory
+  deleteCategory,
+  initializeDefaultUsers
 } from './src/database';
 
 // In-memory token store (maps token -> user data)
@@ -77,6 +78,10 @@ initializeDatabase().catch((error) => {
 // Initialize categories
 initializeCategories().catch((error) => {
   console.error('Failed to initialize categories:', error);
+});
+
+initializeDefaultUsers().catch((error) => {
+  console.error('Failed to initialize default users:', error);
 });
 
 // ============ USER AUTHENTICATION ============

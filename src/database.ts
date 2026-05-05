@@ -1,5 +1,6 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
 import crypto from 'crypto';
+import { DEFAULT_DEMO_USERS } from './constants';
 
 // MongoDB Connection URI with compression enabled
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/design_project?compressors=zlib&serverSelectionTimeoutMS=5000';
@@ -502,6 +503,20 @@ export async function initializeCategories() {
     }
   } catch (error: any) {
     console.log('Categories already initialized or error:', error.message);
+  }
+}
+
+export async function initializeDefaultUsers() {
+  try {
+    for (const u of DEFAULT_DEMO_USERS) {
+      const exists = await UserModel.findOne({ email: u.email }).lean();
+      if (!exists) {
+        await createUser(u.name, u.email, u.password, 'customer');
+        console.log(`✅ Seeded default user: ${u.email}`);
+      }
+    }
+  } catch (error: any) {
+    console.error('❌ Failed to seed default users:', error.message);
   }
 }
 

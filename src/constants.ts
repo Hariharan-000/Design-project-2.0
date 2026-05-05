@@ -1,5 +1,3 @@
-import { Type } from "@google/genai";
-
 export interface Product {
   id: string;
   name: string;
@@ -14,6 +12,12 @@ export interface Product {
 export interface CartItem extends Product {
   quantity: number;
 }
+
+/** Pre-created customer accounts for local demo login (see app + server seed). */
+export const DEFAULT_DEMO_USERS = [
+  { name: 'hari', email: 'hari@gmail.com', password: 'hari123' },
+  { name: 'vishwa', email: 'vishwa@gmail.com', password: 'vishwa123' }
+] as const;
 
 export const CATEGORIES = [
   "All",

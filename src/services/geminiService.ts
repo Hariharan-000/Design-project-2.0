@@ -1,5 +1,3 @@
-import { GoogleGenAI } from "@google/genai";
-
 const MEDICAL_DISCLAIMER =
   "I am an AI assistant, not a doctor. Please consult a healthcare professional for medical advice.";
 
@@ -68,13 +66,11 @@ function buildLocalHealthAssistantResponse(prompt: string) {
 
 export const getGeminiResponse = async (prompt: string) => {
   const apiKey = process.env.GEMINI_API_KEY;
-  const model = "gemini-3-flash-preview";
+  const model = "gemini-2.5-flash";
 
   if (!apiKey) {
     return buildLocalHealthAssistantResponse(prompt);
   }
-
-  const ai = new GoogleGenAI({ apiKey });
 
   const systemInstruction = `
     You are a helpful and professional Health Assistant for E-pharmacy website, an online pharmacy.
@@ -89,16 +85,35 @@ export const getGeminiResponse = async (prompt: string) => {
   `;
 
   try {
-    const response = await ai.models.generateContent({
-      model,
-      contents: [{ parts: [{ text: prompt }] }],
-      config: {
-        systemInstruction,
-        temperature: 0.7,
-      },
-    });
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: systemInstruction.trim() }],
+          },
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.7,
+          },
+        }),
+      }
+    );
 
-    return response.text?.trim() || buildLocalHealthAssistantResponse(prompt);
+    if (!response.ok) {
+      throw new Error(`Gemini HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    const text =
+      data?.candidates?.[0]?.content?.parts
+        ?.map((part: { text?: string }) => part.text || "")
+        .join("")
+        .trim() || "";
+
+    return text || buildLocalHealthAssistantResponse(prompt);
   } catch (error) {
     console.error("Gemini API Error:", error);
     return buildLocalHealthAssistantResponse(prompt);

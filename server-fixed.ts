@@ -5,6 +5,7 @@ import path from 'path';
 import crypto from 'crypto';
 import {
   initializeDatabase,
+  initializeDefaultUsers,
   addProduct,
   getAllProducts,
   getProductById,
@@ -46,6 +47,7 @@ let dbInitialized = false;
 async function startServer() {
   try {
     await initializeDatabase();
+    await initializeDefaultUsers();
     dbInitialized = true;
     console.log('✅ Database initialized successfully');
   } catch (error) {
